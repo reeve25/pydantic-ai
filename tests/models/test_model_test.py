@@ -796,6 +796,32 @@ def test_boolean_schema_tool_args() -> None:
     assert calls == snapshot([{'anything': 'a', 'pair': ['a', 0]}])
 
 
+def test_type_list_tool_args() -> None:
+    """A `type` list such as `['string', 'null']` is generated from one of its types, like an `anyOf`.
+
+    `zod-to-json-schema`, which the MCP TypeScript SDK uses for zod v3 tool schemas, emits this shape for a
+    `.nullable()` primitive; Pydantic itself emits an `anyOf`, which already worked.
+    """
+    calls: list[dict[str, Any]] = []
+
+    def nullable_tool(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        return 'ok'
+
+    schema = {
+        'type': 'object',
+        'properties': {
+            'name': {'type': ['string', 'null']},
+            'nickname': {'type': ['null', 'string']},
+            'tags': {'type': 'array', 'items': {'type': ['integer', 'null']}, 'minItems': 1},
+        },
+        'required': ['name', 'nickname', 'tags'],
+    }
+    tool = Tool.from_schema(nullable_tool, name='nullable_tool', description='Takes nullables.', json_schema=schema)
+    Agent(TestModel(), tools=[tool]).run_sync('hello')
+    assert calls == snapshot([{'name': 'a', 'nickname': None, 'tags': [0]}])
+
+
 @pytest.mark.parametrize(
     'content',
     [
