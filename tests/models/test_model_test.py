@@ -796,6 +796,49 @@ def test_boolean_schema_tool_args() -> None:
     assert calls == snapshot([{'anything': 'a', 'pair': ['a', 0]}])
 
 
+class TreeNode(BaseModel):
+    name: str
+    children: list[TreeNode]
+    by_name: dict[str, TreeNode]
+    parent: TreeNode | None
+
+
+class ExprLeaf(BaseModel):
+    kind: Literal['leaf'] = 'leaf'
+    value: int
+
+
+class ExprBranch(BaseModel):
+    kind: Literal['branch'] = 'branch'
+    left: Annotated[ExprBranch | ExprLeaf, Field(discriminator='kind')]
+
+
+def test_recursive_schema_tool_args() -> None:
+    """A schema that refers back to itself is generated down to its first optional point instead of recursing forever.
+
+    `TestModel` adds an item for an `items` schema and a key for an `additionalProperties` schema, and picks a union
+    member by the seed. A `$ref` back to the definition being generated is skipped at each of those points, so a
+    recursive array or mapping stays empty and a recursive union takes its first member that doesn't recurse.
+    """
+    received: list[dict[str, Any]] = []
+    agent = Agent(TestModel())
+
+    @agent.tool_plain
+    def plant(tree: TreeNode, expr: ExprBranch) -> str:
+        received.append({'tree': tree.model_dump(), 'expr': expr.model_dump()})
+        return 'planted'
+
+    agent.run_sync('hello')
+    assert received == snapshot(
+        [
+            {
+                'tree': {'name': 'a', 'children': [], 'by_name': {}, 'parent': None},
+                'expr': {'kind': 'branch', 'left': {'kind': 'leaf', 'value': 0}},
+            }
+        ]
+    )
+
+
 @pytest.mark.parametrize(
     'content',
     [

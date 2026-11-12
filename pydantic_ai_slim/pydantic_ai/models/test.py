@@ -491,6 +491,7 @@ class _JsonSchemaTestData:
         self.schema = schema
         self.defs = schema.get('$defs', {})
         self.seed = seed
+        self._active_refs: set[str] = set()
 
     def generate(self) -> dict[str, Any]:
         """Generate data for the JSON schema."""
@@ -508,9 +509,9 @@ class _JsonSchemaTestData:
         elif examples := schema.get('examples'):
             return examples[self.seed % len(examples)]
         elif ref := schema.get('$ref'):
-            return self._gen_any(self._resolve_ref(ref))
+            return self._ref_gen(ref)
         elif any_of := schema.get('anyOf'):
-            return self._gen_any(any_of[self.seed % len(any_of)])
+            return self._gen_any(self._pick_member(any_of))
         elif schema.get('oneOf') and 'type' not in schema:
             # a `oneOf` beside a `type` narrows that type, so the `type` drives generation
             return self._one_of_gen(schema)
@@ -543,10 +544,36 @@ class _JsonSchemaTestData:
             return target
         return self.defs[name]
 
+    def _ref_gen(self, ref: str, required: list[str] | None = None) -> Any:
+        """Generate data for a `$ref`, with `required` added to its target.
+
+        The `$ref` is remembered while its data is generated, so that a definition referring back to itself ends at
+        the next optional item, key or union member instead of recursing until `RecursionError`.
+        """
+        target = self._resolve_ref(ref)
+        if required:
+            target = {**target, 'required': [*target.get('required', []), *required]}
+        self._active_refs.add(ref)
+        try:
+            return self._gen_any(target)
+        finally:
+            self._active_refs.discard(ref)
+
+    def _recurses(self, schema: Any) -> bool:
+        """Whether `schema` is a `$ref` back to a definition whose data is being generated right now."""
+        return _utils.is_str_dict(schema) and schema.get('$ref') in self._active_refs
+
+    def _pick_member(self, members: list[Any]) -> Any:
+        """Pick a union member by the seed, moving on to the first one that doesn't recurse if the pick does."""
+        member = members[self.seed % len(members)]
+        if self._recurses(member):
+            member = next((m for m in members if not self._recurses(m)), member)
+        return member
+
     def _one_of_gen(self, schema: dict[str, Any]) -> Any:
         """Generate data for a JSON Schema `oneOf`."""
         one_of = schema['oneOf']
-        member = one_of[self.seed % len(one_of)]
+        member = self._pick_member(one_of)
         if not _utils.is_str_dict(member):
             # a boolean subschema has no structure to generate from
             return self._char()
@@ -558,7 +585,7 @@ class _JsonSchemaTestData:
             required = [*required, tag]
         if required:
             if ref := member.get('$ref'):
-                member = self._resolve_ref(ref)
+                return self._ref_gen(ref, required)
             member = {**member, 'required': [*member.get('required', []), *required]}
         return self._gen_any(member)
 
@@ -572,7 +599,7 @@ class _JsonSchemaTestData:
                 if key in required:
                     data[key] = self._gen_any(value)
 
-        if addition_props := schema.get('additionalProperties'):
+        if (addition_props := schema.get('additionalProperties')) and not self._recurses(addition_props):
             add_prop_key = 'additionalProperty'
             while add_prop_key in data:
                 add_prop_key += '_'
@@ -684,7 +711,7 @@ class _JsonSchemaTestData:
         if min_items > len(data):
             for _ in range(min_items - len(data)):
                 data.append(self._array_item(items_schema, unique_items))
-        elif items_schema:
+        elif items_schema and not self._recurses(items_schema):
             # if there is an `items` schema, add an item unless it would break `maxItems` rule
             if max_items is None or max_items > len(data):
                 data.append(self._array_item(items_schema, unique_items))
